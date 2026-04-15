@@ -1,0 +1,8 @@
+# Python Backend
+backend/venv/
+backend/__pycache__/
+
+# Master Secrets (CRITICAL)
+.env
+backend/.env
+frontend/.env
