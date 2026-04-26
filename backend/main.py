@@ -2,8 +2,9 @@ import base64
 import logging
 import os
 import msgpack
-import msgpack
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List
 from dotenv import load_dotenv
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Community Treasury API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,  # Essential when using origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Supabase Setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -27,29 +36,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Algorand Testnet Setup
 ALGOD_ADDRESS = "https://testnet-api.algonode.cloud"
-ALGOD_TOKEN = ""
-algod_client = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from algosdk.v2client import algod
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-ALGOD_ADDRESS = "https://testnet-api.algonode.cloud"
 ALGOD_TOKEN = ""  # No token is needed for this endpoint
-
-algod_client = algod.AlgodClient(algod_token=ALGOD_TOKEN, algod_address=ALGOD_ADDRESS)
+algod_client = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
 
 @app.get("/")
 def read_root():
-    return {"status": "Algorand Testnet FastAPI app up and running"}
+    return {"message": "Server is Alive"}
 
 @app.get("/health")
 def health_check():
@@ -69,6 +61,11 @@ class ProposalRequest(BaseModel):
     proposer_address: str
     amount: int
     reason: str
+
+class MultisigRequest(BaseModel):
+    treasuryName: str
+    trustees: List[str]
+    threshold: int
 
 @app.get("/generate-test-accounts")
 def generate_test_accounts():
@@ -181,3 +178,32 @@ async def execute_transaction(req: ExecuteRequest):
     except Exception as e:
         print(f"\n====================\nALGORAND ERROR:\n{str(e)}\n====================\n")
         raise HTTPException(status_code=400, detail=f"Transaction execution failed: {str(e)}")
+
+@app.post("/api/v1/treasury/multisig")
+async def create_multisig(request: MultisigRequest):
+    print(f"DEBUG: Received threshold={request.threshold}, trustees={request.trustees}")
+    try:
+        # Use transaction.Multisig to avoid the fatal ImportError we debugged earlier!
+        from algosdk.transaction import Multisig
+        
+        # Force-convert everything to pure types
+        t = int(request.threshold)
+        # Filter out empty strings and trim whitespace
+        a = [str(addr).strip() for addr in request.trustees if addr]
+        
+        msig = Multisig(1, t, a)
+        vault_addr = str(msig.address())
+
+        # 2. Save to Supabase
+        vault_data = {
+            "name": request.treasuryName,
+            "address": vault_addr,
+            "trustees": a,
+            "threshold": t
+        }
+        supabase.table("multisig_vaults").insert(vault_data).execute()
+
+        return {"status": "success", "multisig_address": vault_addr}
+    except Exception as e:
+        # If the address is invalid, return a clean 400 error
+        return JSONResponse(status_code=400, content={"error": f"Invalid Data: {str(e)}"})
